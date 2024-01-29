@@ -25,4 +25,5 @@ meshconfig:
         supports_rgb: true
     mac: 44ADB1815E67
     name: HASS
+# To use authentication -> mqtt://username:password@homeassistant:1883/ 
 mqtt_url: mqtt://homeassistant:1883/
