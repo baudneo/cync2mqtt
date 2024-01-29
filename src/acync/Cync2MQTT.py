@@ -17,81 +17,8 @@ from amqtt.mqtt.constants import QOS_0, QOS_1
 
 from . import acync
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('cync2mqtt')
 logger.addHandler(logging.NullHandler())
-
-
-def run_in_subprocess(args, watchtime):
-    with Path(args.configyaml).open("rt") as fp:
-        configdict = yaml.safe_load(fp)
-
-    for quickcheck in ("mqtt_url", "meshconfig"):
-        if quickcheck not in configdict:
-            logger.error("YAML config must at least define mqtt_url and meshconfig!")
-            return -1
-
-    cm = Cync2MQTT(configdict, watchtime=watchtime)
-    asyncio.run(cm.run_mqtt(), debug=(args.log_level.upper() == "DEBUG"))
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("configyaml", help="YAML config file")
-    parser.add_argument("--log-level", default="INFO", help="set log level")
-    args = parser.parse_args()
-
-    logfmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    numeric_level = getattr(logging, args.log_level.upper(), None)
-
-    if not isinstance(numeric_level, int):
-        raise ValueError("Invalid log level: %s" % args.log_level)
-
-    for logname in ("cync2mqtt", "acync"):
-        setlogger = logging.getLogger(logname)
-        setlogger.setLevel(numeric_level)
-        h = logging.StreamHandler(sys.stdout)
-        h.setLevel(numeric_level)
-        h.setFormatter(logfmt)
-        setlogger.addHandler(h)
-
-    while True:
-        watchtime = Value("Q", int(time.time()))
-        p = Process(target=run_in_subprocess, args=(args, watchtime))
-        p.start()
-
-        def main_handler(signum, frame):
-            logger.info(f"Signal handler called with signal: {signum}")
-            logger.info("Trying clean shutdown")
-            os.kill(p.pid, SIGINT)
-            p.join(30)
-            if p.exitcode is None:
-                p.kill()
-            sys.exit()
-
-        signal(SIGTERM, main_handler)
-        signal(SIGINT, main_handler)
-
-        while True:
-            time.sleep(60)
-            if int(time.time()) > watchtime.value + 600 or p.exitcode is not None:
-                break
-
-        if p.exitcode is None:
-            logger.error("Notify timeout - attempt restart!")
-            # Send signal
-            os.kill(p.pid, SIGINT)
-        elif p.exitcode == -1:
-            break
-        p.join(30)
-        if p.exitcode is None:
-            p.kill()
-
-        sleeptime = watchtime.value + 600 - int(time.time())
-        if sleeptime < 10:
-            sleeptime = 10
-        logger.info(f"Will attempt reconnect in {sleeptime} seconds")
-        time.sleep(sleeptime)
-        logger.info("Restarting!")
 
 
 class Cync2MQTT:
@@ -551,7 +478,3 @@ class Cync2MQTT:
             task.cancel()
         # Wait until all worker tasks are cancelled.
         await asyncio.gather(*tasks, return_exceptions=True)
-
-
-if __name__ == "__main__":
-    main()
