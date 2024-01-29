@@ -1,0 +1,27 @@
+version: '3'
+# - Remember you need to have:
+# - bluez bluetooth stack installed on your host machine
+# - Login and have configured your Cync devices
+# - Done the login and generated the cync_mesh.yaml file
+# - Configured the mqtt broker
+services:
+  cync2mqtt:
+    container_name: cync2mqtt
+    restart: unless-stopped
+    build:
+      dockerfile: Dockerfile
+      context: src
+    volumes:
+      - ~/.cync2mqtt:/home/cync2mqtt
+      # - Bluez bluetooth stack comms
+      - /var/run/dbus/:/var/run/dbus/:z
+    privileged: true
+    networks:
+      - cync2mqtt
+    command: [ "cync2mqtt", "/home/cync2mqtt/cync_mesh.yaml"]
+    # - For debug logging
+    #command: [ "cync2mqtt", "/home/cync2mqtt/cync_mesh.yaml", "--log-level", "DEBUG" ]
+
+networks:
+    cync2mqtt:
+        driver: bridge
