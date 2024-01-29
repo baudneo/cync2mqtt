@@ -1,6 +1,10 @@
 # cync2mqtt Dockerfile Build
 Running in a docker container is a good alternative to running the systemd virtual env setup.  Here are instructions for one possible way to setup using docker.
 
+## Requirements
+- Linux like OS with bluez bluetooth stack.  Has been tested on a number of X86 and ARM (Raspberry Pi) configurations.
+    - This is passed through to the container so the container can access the bluetooth controller. 
+
 ## Setup
 ### Build cync2mqtt Docker Image
 ```shell
