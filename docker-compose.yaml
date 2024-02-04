@@ -6,19 +6,25 @@ version: '3'
 # - Configured the mqtt broker
 services:
   cync2mqtt:
-    container_name: cync2mqtt
+    container_name: c2m
+    image: c2m:latest
     restart: unless-stopped
     build:
-      dockerfile: Dockerfile
+      dockerfile: ../Dockerfile
       context: src
     volumes:
       - ~/docker/cync2mqtt:/home/cync2mqtt
-      # - Bluez bluetooth stack comms
+      # - Access to dbus for bluez bluetooth stack communication
       - /var/run/dbus/:/var/run/dbus/:z
+    environment:
+      # - Set the timezone for the container
+      TZ: "America/Edmonton"
+      # - For debug logging set DEBUG to one of 1, true, yes, t, y
+      DEBUG: 1
     privileged: true
     networks:
       - cync2mqtt
-    command: [ "cync2mqtt", "/home/cync2mqtt/cync_mesh.yaml", "--log-level", "DEBUG"]
+    command: [ "cync2mqtt", "/home/cync2mqtt/cync_mesh.yaml"]
     # - For debug logging
     #command: [ "cync2mqtt", "/home/cync2mqtt/cync_mesh.yaml", "--log-level", "DEBUG" ]
 

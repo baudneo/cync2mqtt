@@ -62,7 +62,7 @@ def run_in_subprocess(args, watchtime):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("configyaml", help="YAML config file", required=True)
+    parser.add_argument("configyaml", help="YAML config file")
     parser.add_argument("--log-level", default='INFO', help='set log level', choices=['DEBUG', 'INFO'])
     parser.add_argument("--prefer-mac", help="MAC address to prefer to connect to")
     args = parser.parse_args()

@@ -8,6 +8,7 @@ ENV CYNC_LIB_SRC=${CYNC_LIB_SRC}
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBUG=0
+
 RUN \
     mkdir -p home/cync2mqtt \
     && apk update \
