@@ -18,6 +18,7 @@ logger = logging.getLogger('cync2mqtt')
 
 
 def run_in_subprocess(args, watchtime):
+    # watchtime is time.time() of when the process was called
     with Path(args.configyaml).open("rt") as fp:
         configdict = yaml.safe_load(fp)
 
@@ -27,17 +28,47 @@ def run_in_subprocess(args, watchtime):
             return -1
 
     cm = Cync2MQTT(configdict, watchtime=watchtime)
-    asyncio.run(cm.run_mqtt(), debug=(args.log_level.upper() == 'DEBUG'))
+    dbg_arg = False
+    if args.log_level.upper() == 'DEBUG':
+        dbg_arg = True
+        logger.debug("Debug mode enabled by CLI argument")
+
+    if dbg_env := os.environ.get('DEBUG') is not None:
+        dbg_env = dbg_env.strip().upper()
+        _t = ('TRUE', '1', 'YES', 'Y', 'T')
+        _f = ('FALSE', '0', 'NO', 'N', 'F')
+
+        if dbg_env in _t + _f:
+            if dbg_env in _t:
+                dbg_arg = True
+                logger.debug("Debug mode enabled by DEBUG environment variable")
+
+            elif dbg_env in _f:
+                dbg_arg = False
+                logger.debug("Debug mode disabled by DEBUG environment variable")
+        if dbg_arg is True:
+            for handler in logger.handlers:
+                handler.setLevel(logging.DEBUG)
+            logger.setLevel(logging.DEBUG)
+        elif dbg_arg is False:
+            for handler in logger.handlers:
+                handler.setLevel(logging.INFO)
+            logger.setLevel(logging.INFO)
+
+    # import uvloop
+    # uvloop.new_event_loop().run_until_complete(cm.run_mqtt())
+    asyncio.run(cm.run_mqtt(), debug=dbg_arg)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("configyaml", help="YAML config file", required=True)
     parser.add_argument("--log-level", default='INFO', help='set log level', choices=['DEBUG', 'INFO'])
+    parser.add_argument("--prefer-mac", help="MAC address to prefer to connect to")
     args = parser.parse_args()
 
     logfmt = logging.Formatter(
-    "'%(asctime)s.%(msecs)04d' %(name)s[%(levelname)s] %(module)s:%(lineno)d -> %(message)s",
+    "%(asctime)s.%(msecs)04d %(name)s [%(levelname)s] %(module)s:%(lineno)d -> %(message)s",
     "%m/%d/%y %H:%M:%S",
 )
     numeric_level = getattr(logging, args.log_level.upper(), None)
@@ -45,7 +76,8 @@ def main():
     if not isinstance(numeric_level, int):
         raise ValueError('Invalid log level: %s' % args.log_level)
 
-    for logname in ('cync2mqtt', 'acync'):
+    # set log level, log format and add a handler to stdout
+    for logname in (Cync2MQTT.LOG_NAME, Cync2MQTT.acync.LOG_NAME):
         setlogger = logging.getLogger(logname)
         setlogger.setLevel(numeric_level)
         h = logging.StreamHandler(sys.stdout)
@@ -59,10 +91,12 @@ def main():
         p.start()
 
         def main_handler(signum, frame):
+            """Signal handler to catch SIGINT and SIGTERM and try to shutdown cleanly. If it fails, just kill the process."""
+            timeout = 30
             logger.info(f'Signal handler called with signal: {signum}')
-            logger.info("Trying clean shutdown")
+            logger.info("Trying clean shutdown (timeout %d)", timeout)
             os.kill(p.pid, SIGINT)
-            p.join(30)
+            p.join(timeout)
             if p.exitcode is None:
                 p.kill()
             sys.exit()
@@ -72,6 +106,7 @@ def main():
 
         while True:
             time.sleep(60)
+            # if it is currently 10 mins past the last time we checked, or the process has exited, break the loop
             if int(time.time()) > watchtime.value + 600 or p.exitcode is not None:
                 break
 

@@ -8,7 +8,7 @@ Bridge Cync bluetooth mesh to mqtt. Includes auto-discovery for HomeAssistant.  
 
 ## Requirements
 - Linux like OS with bluez bluetooth stack.  Has been tested on a number of X86 and ARM (Raspberry Pi) configurations.  It might work on Windows but as far as I know no one has tried.
-- MQTT broker (my config is mosquitto from [Entware](https://github.com/Entware/Entware) running on router).
+- MQTT broker (my config is mosquitto from [Entware](https://github.com/Entware/Entware) running on router). HASS Mosquitto broker also works.
 - GE/Savant Cync Switches, Bulbs.
 - Optional (but recommended): [Home Assistant](https://www.home-assistant.io/)
 

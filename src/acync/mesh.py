@@ -339,6 +339,7 @@ class atelink_mesh:
         for retry in range(0, 3):
             if self.sk is not None:
                 break
+            logger.debug(f"telink mesh: attempt: {retry + 1} --- {self.meshmacs = }")
             for mac in sorted(self.meshmacs, key=lambda x: self.meshmacs[x]):
                 if self.meshmacs[mac] < 0:
                     continue
@@ -348,11 +349,16 @@ class atelink_mesh:
                     await self.client.connect()
                 except:
                     self.meshmacs[mac] += 1
-                    logger.info(f"Unable to connect to mesh mac: {mac}")
+                    logger.info(
+                        f"telink mesh: EXCEPTION! Unable to CONNECT to mesh mac: {mac}",
+                        exc_info=True,
+                    )
                     await asyncio.sleep(0.1)
                     continue
                 if not self.client.is_connected:
-                    logger.info(f"Unable to connect to mesh mac: {mac}")
+                    logger.info(
+                        f"telink mesh: NOT CONNECTED! Initial connection worked but now unable to connect to mesh mac: {mac}"
+                    )
                     continue
 
                 self.currentmac = mac
@@ -381,8 +387,11 @@ class atelink_mesh:
                     )
                     await asyncio.sleep(0.3)
                     data2 = await self.client.read_gatt_char(atelink_mesh.pairing_char)
-                except:
-                    logger.info(f"Unable to connect to mesh mac: {mac}")
+                except Exception as e:
+                    logger.warning(
+                        f"telink mesh: Exception! Unable to PAIR to mesh mac: {mac}",
+                        exc_info=True,
+                    )
                     await self.client.disconnect()
                     self.sk = None
                     continue
@@ -506,7 +515,7 @@ class network(atelink_mesh):
 
     def __init__(self, meshmacs, name, password, usebtlib=None, **kwargs):
         self.callback = kwargs.get("callback", None)
-        return atelink_mesh.__init__(self, 0x0211, meshmacs, name, password, usebtlib)
+        return super.__init__(self, 0x0211, meshmacs, name, password, usebtlib)
 
     async def callback_handler(self, sender, data):
         if self.callback is None:

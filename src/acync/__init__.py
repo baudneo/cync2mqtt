@@ -33,7 +33,8 @@ from .mesh import network, device
 import logging
 import re
 
-logger = logging.getLogger(__name__)
+LOG_NAME = "acync"
+logger = logging.getLogger(LOG_NAME)
 logger.addHandler(logging.NullHandler())
 
 
@@ -47,8 +48,10 @@ def randomLoginResource():
 
 class acync:
     API_TIMEOUT = 5
+    LOG_NAME = LOG_NAME
 
     # https://github.com/unixpickle/cbyge/blob/main/login.go
+    @staticmethod
     def _authenticate_2fa():
         """Authenticate with the API and get a token."""
         username = input("Enter Username (or emailed code):")
@@ -101,6 +104,7 @@ class acync:
         )
         return r.json()
 
+    @staticmethod
     def get_app_meshinfo():
         (auth, userid) = acync._authenticate_2fa()
         mesh_networks = acync._get_devices(auth, userid)
@@ -110,7 +114,7 @@ class acync:
             )
         return mesh_networks
 
-    def app_meshinfo_to_configdict(meshinfo):
+    def app_meshinfo_to_configdict(self, meshinfo):
         meshconfig = {}
 
         for mesh in meshinfo:
@@ -173,9 +177,11 @@ class acync:
             await self.callback(self, devicestatus)
 
     def populate_from_configdict(self, configdict):
+        logger.debug("%s: attempting to create bt mesh from YAML config file...", LOG_NAME)
         for meshid, mesh in configdict["meshconfig"].items():
             if "name" not in mesh:
                 mesh["name"] = f"mesh_{meshid}"
+            # this sets device priority to 0 if not in config
             meshmacs = {}
             for bulb in mesh["bulbs"].values():
                 # support MAC in config with either colons or not
@@ -184,6 +190,7 @@ class acync:
                 meshmacs[mac] = bulb["priority"] if "priority" in bulb else 0
 
             # print(f"Add network: {mesh['name']}")
+            # add MAC to meshmap
             self.meshmap[mesh["mac"]] = mesh["name"]
 
             usebtlib = None
@@ -275,6 +282,6 @@ class acync:
                     connected.append(meshname)
         except:
             await self.disconnect()
-            raise Exception("Unable to connect to mesh network(s)")
+            raise Exception("acync: Unable to connect to mesh network(s)")
 
         return connected

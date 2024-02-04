@@ -67,7 +67,7 @@ class Cync2MQTT:
         scale = (self.cync_min_mired - self.cync_max_mired) / 99
         return self.cync_max_mired + int(scale * (ct - 1))
 
-    async def pub_worker(self, pubqueue):
+    async def pub_worker(self, pubqueue: asyncio.Queue):
         while True:
             (asyncobj, devicestatus) = await pubqueue.get()
             logger.debug(f"pub_worker - device_status: {devicestatus}")
@@ -381,7 +381,7 @@ class Cync2MQTT:
             )
             ret = await self.mqtt.connect(self.mqtt_url)
         except Exception as ce:
-            logger.error("MQTT Connection failed: %s" % ce)
+            logger.error("MQTT Connection failed: %s" % ce, exc_info=True)
             # raise Exception("MQTT Connection failed: %s" % ce)
             try:
                 await self.mqtt.disconnect()
@@ -392,9 +392,7 @@ class Cync2MQTT:
 
         pubqueue = asyncio.Queue()
         subqueue = asyncio.Queue()
-
         #        self.meshnetworks=acync(self.cloudjson,log=logger,callback=lambda asyncobj,devicestatus,q=pubqueue: q.put_nowait((asyncobj,devicestatus)))
-
         import functools
 
         self.mesh_networks = acync(
