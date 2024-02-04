@@ -1,7 +1,7 @@
 FROM alpine:3.18.2 as base
 
 ARG MESH_CONFIG='/home/cync2mqtt/cync_mesh.yaml'
-ARG CYNC_LIB_SRC='git+https://github.com/baudneo/cync2mqtt.git@baudneo-patch-1'
+ARG CYNC_LIB_SRC='git+https://github.com/baudneo/cync2mqtt.git@test'
 
 ENV MESH_CONFIG=${MESH_CONFIG}
 ENV CYNC_LIB_SRC=${CYNC_LIB_SRC}
@@ -41,7 +41,6 @@ RUN \
     && apk del \
       build-base \
       glib-dev \
-      git \
     && rm -rf /var/cache/apk/*
 
 ENTRYPOINT ["cync2mqtt", "${MESH_CONFIG:-/home/cync2mqtt/cync_mesh.yaml}"]
