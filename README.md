@@ -13,29 +13,58 @@ Bridge Cync bluetooth mesh to mqtt. Includes auto-discovery for HomeAssistant.  
 - Optional (but recommended): [Home Assistant](https://www.home-assistant.io/)
 
 ## Setup
-See also [Docker Instructions](README.docker.md)
-### Create a python3 virtual env
+
+### Docker
+Running in a docker container is a good alternative to running the systemd virtual env setup.  Here are instructions for one possible way to setup using docker.
+
 ```shell
-python3 -mvenv ~/venv/cync2mqtt
+# Create a directory to store the mesh configuration file:
+mkdir ~/docker/cync2mqtt
+
+# Clone the repo and cd into it
+git clone https://github.com/baudneo/cync2mqtt && cd cync2mqtt
+
+# Build the image
+docker compose build
+
+# Run login and 2fa to get mesh configuration exported to a file:
+docker run --rm -it -v ~/docker/cync2mqtt:/home/cync2mqtt cync2mqtt get_cync_config_from_cloud /home/cync2mqtt/cync_mesh.yaml
+
+# Edit the generated yaml file as necessary.  The only thing which should be necessary at a minimum is to make sure the mqtt_url definition matches your MQTT broker.
+
+# Edit the docker-compose.yaml file and set DEBUG: 1 for your first run
+docker compose up
+# If it connects to a mesh network, it is connected to one of the cync bt devices. Ctrl+C
+
+# Run it in detached mode
+docker compose up -d
+# manage the service using docker compose <command> (docker compose logs -f, etc.)
+```
+### Non Docker
+#### Create a python3 virtual env
+```shell
+python3 -mvenv ~/cync2mqtt/venv
 ```
 
-### install into virtual environment
+#### install into virtual environment
 ```shell
-~/venv/cync2mqtt/bin/pip3 install git+https://github.com/juanboro/cync2mqtt.git
+~/cync2mqtt/venv/bin/pip3 install git+https://github.com/baudneo/cync2mqtt
 ```
-#### Note Python3.10+
-[AMQTT](https://github.com/Yakifo/amqtt) does not yet have a released version for Python3.10+.  To run with Python3.10, you can currently install in virtual environment like this:
+
+##### Note Python3.10+
+[AMQTT](https://github.com/Yakifo/amqtt) does not yet have a released version for Python3.10+.  To run with Python3.10+, you can currently install in virtual environment like this:
 ```shell
-git clone https://github.com/juanboro/cync2mqtt.git src_cync2mqtt
-~/venv/cync2mqtt/bin/pip3 install -r src_cync2mqtt/requirements.python3.10.txt  src_cync2mqtt/
+git clone https://github.com/baudneo/cync2mqtt.git src_cync2mqtt
+~/cync2mqtt/venv/bin/pip3 install -r src_cync2mqtt/requirements.python3.10.txt  src_cync2mqtt/
 ```
-### Download Mesh Configuration from CYNC using 2FA
+
+#### Download Mesh Configuration from CYNC using 2FA
 Make sure your devices are all configured in the Cync app, then:
 ```shell
-~/venv/cync2mqtt/bin/get_cync_config_from_cloud ~/cync_mesh.yaml
+~/cync2mqtt/venv/bin/get_cync_config_from_cloud ~/cync_mesh.yaml
 ```
 
-You will be prompted for your username (email) - you'll then get a onetime passcode on the email you will enter as well as your password.
+You will be prompted for your username (email) - get a onetime passcode to that email you will enter - enter your cync account password.
 
 ### Edit generated configuration
 Edit the generated yaml file as necessary.  The only thing which should be necessary at a minimum is to make sure the mqtt_url definition matches your MQTT broker.  Also see: [cync_mesh_example.yaml](cync_mesh_example.yaml) 
@@ -43,8 +72,11 @@ Edit the generated yaml file as necessary.  The only thing which should be neces
 ### Test Run
 Run the script with the config file:
 ```shell
-~/venv/cync2mqtt/bin/cync2mqtt  ~/cync_mesh.yaml
+~/cync2mqtt/venv/bin/cync2mqtt  ~/cync_mesh.yaml
+# debug logging
+~/cync2mqtt/venv/bin/cync2mqtt  ~/cync_mesh.yaml --log-level debug
 ```
+
 If it works you should see an INFO message similar to this:
 ```shell
 cync2mqtt - INFO - Connected to mesh mac: XX:XX:XX:XX:XX:XX

@@ -1,15 +1,25 @@
 # CYNC / C-GE bluetooth mesh light control implemented with BLEAK: https://github.com/hbldh/bleak
+import asyncio
+import concurrent.futures
+import functools
+import logging
+import queue
+import random
+from collections import namedtuple
+from typing import Optional, Union, Dict, Tuple
+
+import bluepy.btle
+from Crypto.Cipher import AES
+import Crypto.Random
+from bleak import BleakClient, BleakScanner, BLEDevice, AdvertisementData
 
 # some information from:
 # http://wiki.telink-semi.cn//tools_and_sdk/BLE_Mesh/Telink_Mesh/telink_mesh_sdk.zip
-
 # implementation largely based on:
 # https://github.com/google/python-dimond
 # and
 # https://github.com/google/python-laurel
-
 # which are...
-
 # Copyright 2018 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,20 +37,9 @@
 # Contains code derived from python-tikteck,
 # Copyright 2016 Matthew Garrett <mjg59@srcf.ucam.org>
 
-from bleak import BleakClient
-import bluepy.btle
-from Crypto.Cipher import AES
-from Crypto.Random import get_random_bytes
-import random
-import asyncio
-from collections import namedtuple
-import logging
-import queue
-import functools
-import concurrent.futures
-
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+SCAN_TIMEOUT = 3
 
 
 def encrypt(key, data):
@@ -153,7 +152,7 @@ def decrypt_packet(sk, address, packet):
     return packet
 
 
-class bluepyDelegate(bluepy.btle.DefaultDelegate):
+class BluePyDelegate(bluepy.btle.DefaultDelegate):
     def __init__(self, notifyqueue):
         bluepy.btle.DefaultDelegate.__init__(self)
         self.notifyqueue = notifyqueue
@@ -162,22 +161,32 @@ class bluepyDelegate(bluepy.btle.DefaultDelegate):
         self.notifyqueue.put((cHandle, data))
 
 
-class btle_gatt(object):
-    def __init__(self, mac, uselib="bleak"):
-        self.mac = mac
-        self.is_connected = None
+class BtLEGATT(object):
+    def __init__(self, mac: str, uselib: str = "bleak", friendly_name: Optional[str] = None):
+        self.mac_rssi: Optional[int] = None
+        self.mac: str = mac
+        self.is_connected: Optional[bool] = None
         self.notifytasks = None
         self.notifyqueue = None
-        self._notifycallbacks = {}
-        self.loop = asyncio.get_running_loop()
-        self.bluepy_lock = asyncio.Lock()
+        self._notifycallbacks: dict = {}
+        self.loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+        self.bluepy_lock: asyncio.Lock = asyncio.Lock()
+        self.macdata = None
+        self.sk = None
+        self._uuidchars: dict = {}
+        self.client: Union[BleakClient, bluepy.btle.Peripheral, None]
+        self.use_bt_lib: Optional[str] = uselib
+        self.discovered_devices: Optional[Dict[str, Tuple[BLEDevice, AdvertisementData]]] = {}
+        self.friendly_name: Optional[str] = friendly_name
 
         if uselib == "bleak":
-            self.client = BleakClient(mac)
+            self.client = None
+
         elif uselib == "bluepy":
+            logger.info("btle_gatt: using bluepy library")
             self.client = bluepy.btle.Peripheral()
         else:
-            raise ValueError(f"bluetooth library: {uselib} not supported")
+            raise ValueError("btle_gatt: bluetooth library: %s not supported" % uselib)
 
     async def notify_worker(self):
         pool = concurrent.futures.ThreadPoolExecutor(1)
@@ -197,13 +206,22 @@ class btle_gatt(object):
                     pool, self.client.waitForNotifications, 0.25
                 )
 
+    async def discover(self):
+        self.discovered_devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT, return_adv=True)
+        if not self.discovered_devices:
+            logger.debug(f"btle_gatt: no devices discovered!")
+        else:
+            logger.debug(f"btle_gatt: discovered {len(self.discovered_devices)} devices")
+        return self.discovered_devices
+
     async def connect(self, timeout=20):
+        # logger.debug(f"btle_gatt: connect called for device: {self.mac} [{self.friendly_name}]")
+        if self.is_connected:
+            logger.debug(f"btle_gatt: already connected to {self.mac}")
+            return
         self.macdata = None
         self.sk = None
         self._uuidchars = {}
-
-        if self.is_connected:
-            return
 
         if isinstance(self.client, bluepy.btle.Peripheral):
             async with self.bluepy_lock:
@@ -218,12 +236,33 @@ class btle_gatt(object):
                 self.notifyqueue = queue.Queue()
                 self.notifytasks = []
                 self.notifytasks.append(asyncio.create_task(self.notify_worker()))
-                self.client.setDelegate(bluepyDelegate(self.notifyqueue))
-                self.is_connected = True
+                self.client.setDelegate(BluePyDelegate(self.notifyqueue))
+                status = self.client.status()
+                result = status.get("state") == ['conn']
+                logger.debug(f"btle_gatt:{self.use_bt_lib}: status() = {status} -- {result = }")
+                self.is_connected = result
+
             return result
         else:
+            # bleak
+            device = None
+            if self.mac not in self.discovered_devices:
+                await self.discover()
+            if self.mac in self.discovered_devices:
+                device = self.discovered_devices[self.mac][0]
+                advertisement = self.discovered_devices[self.mac][1]
+                self.mac_rssi = advertisement.rssi
+                logger.debug(f"btle_gatt:{self.use_bt_lib}: Scanning found device: {self.friendly_name} - "
+                             f" Device: {device} --- Advertisement: {advertisement}")
+            if device is None:
+                logger.error(
+                    f"btle_gatt:{self.use_bt_lib}: Scanning could not find device: {self.mac} [{self.friendly_name}]"
+                )
+                return
+
+            self.client = BleakClient(device)
             status = await self.client.connect(timeout=timeout)
-            self.is_connected = True
+            self.is_connected = status
             return status
 
     async def bluepy_get_char_from_uuid(self, uuid):
@@ -249,7 +288,7 @@ class btle_gatt(object):
                     functools.partial(char.write, data, withResponse=withResponse),
                 )
             return result
-        else:
+        elif isinstance(self.client, BleakClient):
             return await self.client.write_gatt_char(uuid, data, withResponse)
 
     async def read_gatt_char(self, uuid):
@@ -260,7 +299,7 @@ class btle_gatt(object):
                     concurrent.futures.ThreadPoolExecutor(1), char.read
                 )
             return result
-        else:
+        elif isinstance(self.client, BleakClient):
             return await self.client.read_gatt_char(uuid)
 
     async def disconnect(self):
@@ -286,96 +325,130 @@ class btle_gatt(object):
                 )
             self._notifycallbacks[handle] = callback_handler
             self.notifytasks.append(asyncio.create_task(self.notify_waiter()))
-        else:
+        elif isinstance(self.client, BleakClient):
             return await self.client.start_notify(uuid, callback_handler)
 
 
-class atelink_mesh:
+class ATELinkMesh:
     # http://wiki.telink-semi.cn/wiki/protocols/Telink-Mesh/
 
     notification_char = "00010203-0405-0607-0809-0a0b0c0d1911"
     control_char = "00010203-0405-0607-0809-0a0b0c0d1912"
     pairing_char = "00010203-0405-0607-0809-0a0b0c0d1914"
 
-    def __init__(self, vendor, meshmacs, name, password, usebtlib=None):
+    def __init__(
+            self,
+            vendor,
+            mesh_macs: Dict[str, Tuple[int, str, int]],
+            name: str,
+            password: str,
+            usebtlib: Optional[str] = None,
+    ):
         self.vendor = vendor
-        self.meshmacs = {x: 0 for x in meshmacs} if type(meshmacs) is list else meshmacs
-        self.name = name
-        self.password = password
+        self.mesh_macs = (
+            {x: (0, 'unknown') for x in mesh_macs} if type(mesh_macs) is list else mesh_macs
+        )
+        self.name: str = name
+        self.password: str = password
         self.packet_count = random.randrange(0xFFFF)
-        self.macdata = None
+        self.mac_data = None
         self.sk = None
         self.client = None
-        self.currentmac = None
+        self.current_mac: Optional[str] = ""
         if usebtlib is None:
-            self.uselib = "bleak"
+            self.use_bt_lib = "bleak"
         else:
-            self.uselib = usebtlib
+            self.use_bt_lib = usebtlib
 
     async def __aenter__(self):
+        logger.debug("telink mesh: __aenter__")
         await self.connect()
         return self
 
     async def __aexit__(self, exc_t, exc_v, exc_tb):
+        logger.debug("telink mesh: __aexit__")
         await self.disconnect()
 
     async def disconnect(self):
         if self.client is not None:
             try:
                 await self.client.disconnect()
-            except:
-                logger.info("disconnect returned false")
+            except Exception as e:
+                logger.info("disconnect returned false -> %s" % e)
             self.client = None
 
     async def callback_handler(self, sender, data):
         print(
-            "{0}: {1}".format(sender, decrypt_packet(self.sk, self.macdata, list(data)))
+            "{0}: {1}".format(
+                sender, decrypt_packet(self.sk, self.mac_data, list(data))
+            )
         )
 
     async def connect(self):
-        self.macdata = None
+        self.mac_data = None
         self.sk = None
+        total_macs = len(self.mesh_macs)
 
         for retry in range(0, 3):
             if self.sk is not None:
+                # Assuming we are already connected
                 break
-            logger.debug(f"telink mesh: attempt: {retry + 1} --- {self.meshmacs = }")
-            for mac in sorted(self.meshmacs, key=lambda x: self.meshmacs[x]):
-                if self.meshmacs[mac] < 0:
+            # self.meshmacs schema -> { MAC[str] : (priority[int], firendly_name[str]) }
+            for mac_idx, mac in enumerate(
+                    sorted(self.mesh_macs, key=lambda x: self.mesh_macs[x][0])
+            ):
+                mac_priority = self.mesh_macs[mac][0]
+                mac_friendly_name = self.mesh_macs[mac][1]
+                logger.debug(
+                    f"telink mesh:connect: attempt: {retry + 1}/3 to MAC ({mac_idx + 1}/{total_macs}): {mac} "
+                    f"[{mac_friendly_name}] Timeout: {SCAN_TIMEOUT}"
+                )
+                # if priority is less than 0, skip it
+                if mac_priority < 0:
+                    logger.warning(
+                        f"telink mesh:connect: Skipping, priority < 0 -> MAC: {mac} [{mac_friendly_name}]"
+                    )
                     continue
-                self.client = btle_gatt(mac, uselib=self.uselib)
+                self.client = BtLEGATT(mac, uselib=self.use_bt_lib, friendly_name=mac_friendly_name)
 
                 try:
+                    # BtLEGATT.connect wrapper
                     await self.client.connect()
-                except:
-                    self.meshmacs[mac] += 1
+                except Exception as e:
+                    # increment priority
+                    mac_priority += 1
+                    self.mesh_macs[mac] = (mac_priority, mac_friendly_name)
+                    exc_ = True if not str(e) else False
                     logger.info(
-                        f"telink mesh: EXCEPTION! Unable to CONNECT to mesh mac: {mac}",
-                        exc_info=True,
+                        "telink mesh:connect: EXCEPTION! Unable to CONNECT to device: %s [%s] --> %s"
+                        % (mac, mac_friendly_name, e),
+                        exc_info=exc_,
                     )
                     await asyncio.sleep(0.1)
                     continue
                 if not self.client.is_connected:
-                    logger.info(
-                        f"telink mesh: NOT CONNECTED! Initial connection worked but now unable to connect to mesh mac: {mac}"
-                    )
+                    # logger.info(
+                    #     "telink mesh: NOT CONNECTED! Initial connection worked but now unable "
+                    #     "to connect to mesh mac: %s" % mac
+                    # )
                     continue
 
-                self.currentmac = mac
-                macarray = mac.split(":")
-                self.macdata = [
-                    int(macarray[5], 16),
-                    int(macarray[4], 16),
-                    int(macarray[3], 16),
-                    int(macarray[2], 16),
-                    int(macarray[1], 16),
-                    int(macarray[0], 16),
+                self.current_mac = mac
+                mac_array = mac.split(":")
+                self.mac_data = [
+                    int(mac_array[5], 16),
+                    int(mac_array[4], 16),
+                    int(mac_array[3], 16),
+                    int(mac_array[2], 16),
+                    int(mac_array[1], 16),
+                    int(mac_array[0], 16),
                 ]
-
+                # create random 8 byte challenge for pairing and secure key generation
                 data = [0] * 16
-                random_data = get_random_bytes(8)
+                random_data = Crypto.Random.get_random_bytes(8)
                 for i in range(8):
                     data[i] = random_data[i]
+
                 enc_data = key_encrypt(self.name, self.password, data)
                 packet = [0x0C]
                 packet += data[0:8]
@@ -383,52 +456,61 @@ class atelink_mesh:
 
                 try:
                     await self.client.write_gatt_char(
-                        atelink_mesh.pairing_char, bytes(packet), True
+                        ATELinkMesh.pairing_char, bytes(packet), True
                     )
                     await asyncio.sleep(0.3)
-                    data2 = await self.client.read_gatt_char(atelink_mesh.pairing_char)
+                    data2 = await self.client.read_gatt_char(ATELinkMesh.pairing_char)
                 except Exception as e:
                     logger.warning(
-                        f"telink mesh: Exception! Unable to PAIR to mesh mac: {mac}",
+                        "telink mesh:connect: Exception! Unable to PAIR to mesh mac: %s -> %s"
+                        % (mac, e),
                         exc_info=True,
                     )
                     await self.client.disconnect()
                     self.sk = None
                     continue
                 else:
+                    # logger.debug(
+                    #     f"telink mesh:connect: Paired to device: {mac} [{mac_friendly_name}]"
+                    # )
                     self.sk = generate_sk(
                         self.name, self.password, data[0:8], data2[1:9]
                     )
 
                     try:
                         await self.client.start_notify(
-                            atelink_mesh.notification_char, self.callback_handler
+                            ATELinkMesh.notification_char, self.callback_handler
                         )
                         await asyncio.sleep(0.3)
                         await self.client.write_gatt_char(
-                            atelink_mesh.notification_char, bytes([0x1]), True
+                            ATELinkMesh.notification_char, bytes([0x1]), True
                         )
                         await asyncio.sleep(0.3)
-                        data3 = await self.client.read_gatt_char(
-                            atelink_mesh.notification_char
+                        _ = await self.client.read_gatt_char(
+                            ATELinkMesh.notification_char
                         )
-                        logger.info(f"Connected to mesh mac: {mac}")
                     except Exception as e:
                         logger.info(
-                            f"Unable to connect to mesh mac for notify: {mac} - {e}"
+                            f"telink mesh:connect: Unable to connect to mesh mac for notify: %s -> %s"
+                            % (mac, e),
                         )
                         await self.client.disconnect()
                         self.sk = None
                         continue
+                    else:
+                        logger.info(f"telink mesh:connect: Connected to mesh ID: {self.name} via MAC: {mac} [{mac_friendly_name}]")
+
                     break
 
         return self.sk is not None
 
     async def update_status(self):
         if self.sk is None:
-            logger.info("Attempt re-connect...")
+            logger.info(f"telink mesh:update_status: Attempt re-connect...")
             if not self.connect():
                 return False
+        
+        # logger.debug(f"telink mesh:update_status: current_mac: {self.current_mac}")
 
         ok = False
         for trycount in range(0, 3):
@@ -436,20 +518,21 @@ class atelink_mesh:
                 break
             try:
                 await self.client.write_gatt_char(
-                    atelink_mesh.notification_char, bytes([0x1]), True
+                    ATELinkMesh.notification_char, bytes([0x1]), True
                 )
                 await asyncio.sleep(0.3)
-                data3 = await self.client.read_gatt_char(atelink_mesh.notification_char)
+                _ = await self.client.read_gatt_char(ATELinkMesh.notification_char)
                 ok = True
-            except:
+            except Exception as e:
                 logger.info(
-                    "update_status - Unable to connect to send to mesh, retry..."
+                    "update_status - Unable to send to mesh, retry... -> %s"
+                    % e,
                 )
                 try2 = 0
                 connected = False
                 while not connected and try2 < 3:
-                    self.meshmacs[self.currentmac] += 1
-                    self.currentmac = None
+                    self.mesh_macs[self.current_mac][0] += 1
+                    self.current_mac = ""
                     await asyncio.sleep(0.1)
                     logger.info("Disconnect...")
                     await self.disconnect()
@@ -464,14 +547,18 @@ class atelink_mesh:
     @property
     def online(self):
         return (
-            self.client is not None and self.sk is not None and self.macdata is not None
+                self.client is not None
+                and self.sk is not None
+                and self.mac_data is not None
         )
 
     async def send_packet(self, target, command, data):
         if not self.online:
+            logger.debug(f"telink mesh:send_packet: Not online! - Attempt re-connect...")
             if not await self.connect():
                 return False
 
+        # logger.debug(f"telink mesh:send_packet: current_mac: {self.current_mac}")
         packet = [0] * 20
         packet[0] = self.packet_count & 0xFF
         packet[1] = self.packet_count >> 8 & 0xFF
@@ -482,7 +569,7 @@ class atelink_mesh:
         packet[9] = (self.vendor >> 8) & 0xFF
         for i in range(len(data)):
             packet[10 + i] = data[i]
-        enc_packet = encrypt_packet(self.sk, self.macdata, packet)
+        enc_packet = encrypt_packet(self.sk, self.mac_data, packet)
         self.packet_count += 1
         if self.packet_count > 65535:
             self.packet_count = 1
@@ -490,13 +577,15 @@ class atelink_mesh:
         for trycount in range(0, 3):
             try:
                 await self.client.write_gatt_char(
-                    network.control_char, bytes(enc_packet)
+                    Network.control_char, bytes(enc_packet)
                 )
-            except:
-                logger.info(f"send_packet - Unable to connect to send to mesh")
+            except Exception as e:
+                logger.info(
+                    f"send_packet - Unable to connect for sending to mesh -> %s" % e
+                )
                 if trycount < 2:
-                    self.meshmacs[self.currentmac] += 1
-                    self.currentmac = None
+                    self.mesh_macs[self.current_mac] += 1
+                    self.current_mac = ""
                     await asyncio.sleep(0.1)
                     await self.disconnect()
                     await asyncio.sleep(0.1)
@@ -507,15 +596,22 @@ class atelink_mesh:
         return True
 
 
-class network(atelink_mesh):
-    devicestatus = namedtuple(
+class Network(ATELinkMesh):
+    device_status = namedtuple(
         "DeviceStatus",
         ["name", "id", "brightness", "rgb", "red", "green", "blue", "color_temp"],
     )
 
-    def __init__(self, meshmacs, name, password, usebtlib=None, **kwargs):
+    def __init__(
+            self,
+            mesh_macs: Dict[str, Tuple[int, str, int]],
+            name: str,
+            password: str,
+            usebtlib: Optional[str] = None,
+            **kwargs,
+    ):
         self.callback = kwargs.get("callback", None)
-        return super.__init__(self, 0x0211, meshmacs, name, password, usebtlib)
+        super().__init__(0x0211, mesh_macs, name, password, usebtlib)
 
     async def callback_handler(self, sender, data):
         if self.callback is None:
@@ -523,36 +619,38 @@ class network(atelink_mesh):
         data = list(data)
         if len(data) < 19:
             return
-        data = decrypt_packet(self.sk, self.macdata, data)
+        data = decrypt_packet(self.sk, self.mac_data, data)
         if data[7] != 0xDC:
             return
 
         responses = data[10:18]
         for i in (0, 4):
-            response = responses[i : i + 4]
+            response = responses[i: i + 4]
             if response[1] == 0:
                 continue
-            id = response[0]
+            _id = response[0]
             brightness = response[2]
             (red, green, blue) = (0, 0, 0)
             color_temp = 0
             if brightness >= 128:
+                # It supports RGB
                 brightness = brightness - 128
                 red = int(((response[3] & 0xE0) >> 5) * 255 / 7)
                 green = int(((response[3] & 0x1C) >> 2) * 255 / 7)
                 blue = int((response[3] & 0x3) * 255 / 3)
                 rgb = True
             else:
+                # It only supports white
                 color_temp = response[3]
                 rgb = False
             await self.callback(
-                network.devicestatus(
-                    self.name, id, brightness, rgb, red, green, blue, color_temp
+                Network.device_status(
+                    self.name, _id, brightness, rgb, red, green, blue, color_temp
                 )
             )
 
 
-class device:
+class CyncDevice:
     # from: https://github.com/nikshriv/cync_lights/blob/main/custom_components/cync_lights/cync_hub.py
     Capabilities = {
         "ONOFF": [
@@ -897,12 +995,12 @@ class device:
         "MULTIELEMENT": {"67": 2},
     }
 
-    def __init__(self, mesh_network, name, id, mac, type=None):
-        self.network = mesh_network
+    def __init__(self, mesh_network, name, _id, mac, _type=None):
+        self.network: ATELinkMesh = mesh_network
         self.name = name
-        self.id = id
+        self.id = _id
         self.mac = mac
-        self.type = type
+        self.type = _type
         self.brightness = 0
         self.color_temp = 0
         self.red = 0
@@ -947,37 +1045,37 @@ class device:
         return await self.network.send_packet(self.id, 0xD0, [int(power)])
 
     @property
-    def is_plug(self):
+    def is_plug(self) -> bool:
         if self._is_plug is not None:
             return self._is_plug
         if self.type is None:
             return False
-        return self.type in device.Capabilities["PLUG"]
+        return self.type in CyncDevice.Capabilities["PLUG"]
 
     @is_plug.setter
-    def is_plug(self, value):
+    def is_plug(self, value: bool) -> None:
         self._is_plug = value
 
     @property
-    def supports_rgb(self):
+    def supports_rgb(self) -> bool:
         if self._supports_rgb is not None:
             return self._supports_rgb
-        if self._supports_rgb or self.type in device.Capabilities["RGB"]:
+        if self._supports_rgb or self.type in CyncDevice.Capabilities["RGB"]:
             return True
         return False
 
     @supports_rgb.setter
-    def supports_rgb(self, value):
+    def supports_rgb(self, value: bool) -> None:
         self._supports_rgb = value
 
     @property
-    def supports_temperature(self):
+    def supports_temperature(self) -> bool:
         if self._supports_temperature is not None:
             return self._supports_temperature
-        if self.supports_rgb or self.type in device.Capabilities["COLORTEMP"]:
+        if self.supports_rgb or self.type in CyncDevice.Capabilities["COLORTEMP"]:
             return True
         return False
 
     @supports_temperature.setter
-    def supports_temperature(self, value):
+    def supports_temperature(self, value: bool) -> None:
         self._supports_temperature = value

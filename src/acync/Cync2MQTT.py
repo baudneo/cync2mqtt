@@ -1,34 +1,58 @@
 #!/usr/bin/env python3
-import argparse
+from __future__ import annotations
+
 import asyncio
+import functools
 import json
 import logging
 import os
-import sys
 import time
-from multiprocessing import Process, Value
-from pathlib import Path
-from signal import SIGINT, SIGTERM, signal
-from typing import Optional
+from signal import SIGINT, SIGTERM
+from typing import Optional, TYPE_CHECKING
 
-import yaml
 from amqtt.client import MQTTClient
 from amqtt.mqtt.constants import QOS_0, QOS_1
+from bleak import BLEDevice, AdvertisementData
 
-from . import acync
+from . import ACync
 
-logger = logging.getLogger('cync2mqtt')
+if TYPE_CHECKING:
+    from .mesh import Network, CyncDevice
+
+LOG_NAME: str = 'cync2mqtt'
+logger = logging.getLogger(LOG_NAME)
 logger.addHandler(logging.NullHandler())
+STATUS_UPDATE_INTERVAL: int = 600
+MQTT_DEBUG: bool = False
+BT_DEBUG: bool = False
+_true = ('TRUE', '1', 'YES', 'Y', 'T')
+_false = ('FALSE', '0', 'NO', 'N', 'F')
+
+
+def simple_callback(device: BLEDevice, advertisement_data: AdvertisementData):
+    logger.info("%s: %r", device.address, advertisement_data)
 
 
 class Cync2MQTT:
     """docstring for cync2mqtt.py"""
 
     def __init__(self, configdict, **kwargs):
+        if os.environ.get('MQTT_DEBUG') is not None:
+            global MQTT_DEBUG
+            if os.environ.get('MQTT_DEBUG').strip().upper() in _true:
+                MQTT_DEBUG = True
+            elif os.environ.get('MQTT_DEBUG').strip().upper() in _false:
+                MQTT_DEBUG = False
+        if os.environ.get('BT_DEBUG') is not None:
+            global BT_DEBUG
+            if os.environ.get('BT_DEBUG').strip().upper() in _true:
+                BT_DEBUG = True
+            elif os.environ.get('BT_DEBUG').strip().upper() in _false:
+                BT_DEBUG = False
         self.mqtt: Optional[MQTTClient] = None
         self.mqtt_url: Optional[str] = configdict["mqtt_url"]
         self.configdict: Optional[dict] = configdict
-        self.mesh_networks: Optional[acync] = None
+        self.mesh_networks: Optional[ACync] = None
         self.ha_topic: str = (
             configdict["ha_mqtt_topic"]
             if "ha_mqtt_topic" in configdict
@@ -67,76 +91,8 @@ class Cync2MQTT:
         scale = (self.cync_min_mired - self.cync_max_mired) / 99
         return self.cync_max_mired + int(scale * (ct - 1))
 
-    async def pub_worker(self, pubqueue: asyncio.Queue):
-        while True:
-            (asyncobj, devicestatus) = await pubqueue.get()
-            logger.debug(f"pub_worker - device_status: {devicestatus}")
-
-            # TODO - add somesort of timestamp her to toss out messages that are too old
-
-            powerstatus = "ON" if devicestatus.brightness > 0 else "OFF"
-            devicename = f"{devicestatus.name}/{devicestatus.id}"
-            device = asyncobj.devices[devicename]
-            if device.is_plug:
-                logger.debug(
-                    f"pub_worker mqtt publish: {self.topic}/status/{devicename}  {powerstatus}"
-                )
-                try:
-                    message = await self.mqtt.publish(
-                        f"{self.topic}/status/{devicename}",
-                        powerstatus.encode(),
-                        qos=QOS_0,
-                    )
-                except:
-                    logger.error("Unable to publish mqtt message... skipped")
-
-            else:
-                devicestate = {
-                    "brightness": devicestatus.brightness,
-                    "state": powerstatus,
-                }
-                if (
-                    device.supports_rgb
-                    and devicestatus.red | devicestatus.blue | devicestatus.green
-                ):
-                    devicestate["color_mode"] = "rgb"
-                    devicestate["color"] = {
-                        "r": devicestatus.red,
-                        "g": devicestatus.green,
-                        "b": devicestatus.blue,
-                    }
-                    if device.supports_temperature and devicestatus.color_temp > 0:
-                        devicestate["color_mode"] = "rgbw"
-                        devicestate["color_temp"] = self.tlct_to_hassct(
-                            devicestatus.color_temp
-                        )
-
-                elif device.supports_temperature:
-                    devicestate["color_mode"] = "color_temp"
-                    devicestate["color_temp"] = self.tlct_to_hassct(
-                        devicestatus.color_temp
-                    )
-
-                logger.debug(
-                    f"pub_worker  mqtt publish: {self.topic}/status/{devicename}  "
-                    + json.dumps(devicestate)
-                )
-                try:
-                    message = await self.mqtt.publish(
-                        f"{self.topic}/status/{devicename}",
-                        json.dumps(devicestate).encode(),
-                        qos=QOS_0,
-                    )
-                except:
-                    logger.error("Unable to publish mqtt message... skipped")
-
-                # ,json.dumps(devicestatus._asdict()).encode(), qos=QOS_0)
-
-            # Notify the queue that the "work item" has been processed.
-            pubqueue.task_done()
-
     async def homeassistant_discovery(self):
-        logger.debug("Doing homeassistant_discovery")
+        logger.info("Starting HomeAssistant MQTT discovery...")
         for devicename, device in self.mesh_networks.devices.items():
             if device.is_plug:
                 switchconfig = {
@@ -151,7 +107,7 @@ class Cync2MQTT:
                 logger.debug(
                     f"mqtt publish: {self.ha_topic}/switch/{devicename}/config  "
                     + json.dumps(switchconfig)
-                )
+                ) if MQTT_DEBUG is True else None
                 try:
                     message = await self.mqtt.publish(
                         f"{self.ha_topic}/switch/{devicename}/config",
@@ -159,7 +115,7 @@ class Cync2MQTT:
                         qos=QOS_1,
                     )
                 except:
-                    logger.error("Unable to publish mqtt message... skipped")
+                    logger.error("homeassistant discovery - Unable to publish mqtt message... skipped")
 
             else:
                 lightconfig = {
@@ -187,18 +143,19 @@ class Cync2MQTT:
                 logger.debug(
                     f"mqtt publish: {self.ha_topic}/light/{devicename}/config  "
                     + json.dumps(lightconfig)
-                )
+                ) if MQTT_DEBUG is True else None
                 try:
                     message = await self.mqtt.publish(
                         f"{self.ha_topic}/light/{devicename}/config",
                         json.dumps(lightconfig).encode(),
                         qos=QOS_1,
                     )
-                except:
-                    logger.error("Unable to publish mqtt message... skipped")
+                except Exception as e:
+                    logger.error("homeassistant discovery - Unable to publish mqtt message... skipped -> %s" % e)
+        logger.debug("HomeAssistant MQTT discovery complete")
 
     async def publish_devices(self):
-        logger.debug("publish_devices:")
+        logger.debug("publish_devices: ")
         for devicename, device in self.mesh_networks.devices.items():
             deviceconfig = {
                 "name": device.name,
@@ -218,31 +175,105 @@ class Cync2MQTT:
                 logger.debug(
                     f"mqtt publish: {self.ha_topic}/devices/{devicename}  "
                     + json.dumps(deviceconfig)
-                )
+                ) if MQTT_DEBUG is True else None
                 message = await self.mqtt.publish(
                     f"{self.ha_topic}/devices/{devicename}",
                     json.dumps(deviceconfig).encode(),
                     qos=QOS_1,
                 )
-            except:
-                logger.error("Unable to publish mqtt message... skipped")
+            except Exception as e:
+                logger.error("publish devices - Unable to publish mqtt message... skipped -> %s" % e)
 
-    async def sub_worker(self, subqueue):
+    async def pub_worker(self, pub_queue: asyncio.Queue):
         while True:
-            message = await subqueue.get()
+            async_obj: ACync
+            device_status: Network.device_status
 
+            (async_obj, device_status) = await pub_queue.get()
+
+            # logger.debug(f"pub_worker - {device_status}")
+
+            # TODO - add somesort of timestamp her to toss out messages that are too old
+
+            powerstatus = "ON" if device_status.brightness > 0 else "OFF"
+            devicename = f"{device_status.name}/{device_status.id}"
+            device = async_obj.devices[devicename]
+            if device.is_plug:
+                logger.debug(
+                    f"pub_worker mqtt publish: {self.topic}/status/{devicename}  {powerstatus}"
+                ) if MQTT_DEBUG is True else None
+                try:
+                    message = await self.mqtt.publish(
+                        f"{self.topic}/status/{devicename}",
+                        powerstatus.encode(),
+                        qos=QOS_0,
+                    )
+                except Exception as e:
+                    logger.error("pub worker - Unable to publish mqtt message... skipped -> %s" % e)
+
+            else:
+                devicestate = {
+                    "brightness": device_status.brightness,
+                    "state": powerstatus,
+                }
+                if (
+                    device.supports_rgb
+                    and device_status.red | device_status.blue | device_status.green
+                ):
+                    devicestate["color_mode"] = "rgb"
+                    devicestate["color"] = {
+                        "r": device_status.red,
+                        "g": device_status.green,
+                        "b": device_status.blue,
+                    }
+                    if device.supports_temperature and device_status.color_temp > 0:
+                        devicestate["color_mode"] = "rgbw"
+                        devicestate["color_temp"] = self.tlct_to_hassct(
+                            device_status.color_temp
+                        )
+
+                elif device.supports_temperature:
+                    devicestate["color_mode"] = "color_temp"
+                    devicestate["color_temp"] = self.tlct_to_hassct(
+                        device_status.color_temp
+                    )
+
+                logger.debug(
+                    f"pub_worker  mqtt publish: {self.topic}/status/{devicename}  "
+                    + json.dumps(devicestate)
+                ) if MQTT_DEBUG is True else None
+                try:
+                    message = await self.mqtt.publish(
+                        f"{self.topic}/status/{devicename}",
+                        json.dumps(devicestate).encode(),
+                        qos=QOS_0,
+                    )
+                except Exception as e:
+                    logger.error("pub worker - Unable to publish mqtt message... skipped -> %s" % e)
+
+                # ,json.dumps(devicestatus._asdict()).encode(), qos=QOS_0)
+
+            # Notify the queue that the "work item" has been processed.
+            pub_queue.task_done()
+
+    async def sub_worker(self, sub_queue: asyncio.Queue):
+        while True:
+            message = await sub_queue.get()
             if message is None:
+                logger.error("sub_worker - message is None, skipping...")
                 continue
+            logger.debug(f"sub_worker - {message=}")
 
             try:
                 packet = message.publish_packet
             except:
+                logger.error("sub_worker - message is not a packet, skipping...")
                 continue
 
             logger.debug(
-                "sub_worker: %s => %s"
+                "sub_worker - %s => %s"
                 % (packet.variable_header.topic_name, str(packet.payload.data))
-            )
+            ) if MQTT_DEBUG is True else None
             topic = packet.variable_header.topic_name.split("/")
             if len(topic) == 4:
                 if topic[1] == "set":
@@ -252,7 +283,7 @@ class Cync2MQTT:
                         try:
                             jsondata = json.loads(packet.payload.data)
                         except:
-                            logger.error("bad json message: {jsondata}")
+                            logger.error("sub worker - bad json message: {jsondata}")
                             continue
                         # print(jsondata)
                         if "state" in jsondata and (
@@ -264,7 +295,7 @@ class Cync2MQTT:
                                 await device.set_power(False)
                         if "brightness" in jsondata:
                             lum = int(jsondata["brightness"])
-                            if lum < 5 and lum > 0:
+                            if 5 > lum > 0:
                                 lum = 5  # Workaround issue noted by zimmra
                             await device.set_brightness(lum)
                         if "color_temp" in jsondata:
@@ -287,7 +318,7 @@ class Cync2MQTT:
                 await asyncio.sleep(0.1)
             elif len(topic) == 2:
                 if topic[1] == "shutdown":
-                    logger.info("Shutdown requested")
+                    logger.info("sub worker - Shutdown requested")
                     os.kill(os.getpid(), SIGTERM)
                 elif topic[1] == "devices" and packet.payload.data.lower() == b"get":
                     await self.publish_devices()
@@ -316,7 +347,7 @@ class Cync2MQTT:
                         )
 
             # Notify the queue that the "work item" has been processed.
-            subqueue.task_done()
+            sub_queue.task_done()
         return True
 
     async def status_worker(self):
@@ -326,14 +357,15 @@ class Cync2MQTT:
             for network in self.mesh_networks.networks.values():
                 count = 0
                 while not await network.update_status():
-                    for devicename, device in network.devices.items():
+                    logger.info("network.status_update failed!")
+                    for device_name, device in network.devices.items():
                         availability = b"offline"
                         logger.debug(
-                            f"status_worker  mqtt publish: {self.topic}/availability/{devicename}  {availability}"
-                        )
+                            f"status_worker  mqtt publish: {self.topic}/availability/{device_name}  {availability}"
+                        ) if MQTT_DEBUG is True else None
                         try:
                             message = await self.mqtt.publish(
-                                f"{self.topic}/availability/{devicename}",
+                                f"{self.topic}/availability/{device_name}",
                                 availability,
                                 qos=QOS_0,
                             )
@@ -357,21 +389,38 @@ class Cync2MQTT:
             # Wait a reasonable amount of time for device nodes to report status through the mesh
             await asyncio.sleep(0.2 * len(self.mesh_networks.devices.keys()))
 
-            for devicename, device in self.mesh_networks.devices.items():
+            device_name: str
+            device: CyncDevice
+            for device_name, device in self.mesh_networks.devices.items():
                 availability = b"online" if device.online else b"offline"
                 logger.debug(
-                    f"status_worker  mqtt publish: {self.topic}/availability/{devicename}  {availability}"
-                )
-                message = await self.mqtt.publish(
-                    f"{self.topic}/availability/{devicename}", availability, qos=QOS_0
+                    f"status_worker  mqtt publish: {self.topic}/availability/{device_name}  {availability}"
+                ) if MQTT_DEBUG is True else None
+                await self.mqtt.publish(
+                    f"{self.topic}/availability/{device_name}", availability, qos=QOS_0
                 )
             if self.watch_time is not None:
                 self.watch_time.value = int(time.time())
-            await asyncio.sleep(300)
+            # logger.debug(f"status_worker: sleeping for {STATUS_UPDATE_INTERVAL}...")
+            await asyncio.sleep(STATUS_UPDATE_INTERVAL)
 
     @staticmethod
     async def callback_routine(pubqueue: asyncio.Queue, asyncobj, devicestatus):
         pubqueue.put_nowait((asyncobj, devicestatus))
+
+    def signal_handler(self):
+        logger.debug(f"class Signal handler called, doing disconnections...")
+        # async
+        loop = asyncio.get_running_loop()
+        bt_dc = asyncio.run_coroutine_threadsafe(self.mesh_networks.disconnect(), loop)
+        mqtt_dc = asyncio.run_coroutine_threadsafe(self.mqtt.disconnect(), loop)
+        bt_dc.add_done_callback(lambda f: logger.debug(f"Bluetooth disconnect: {f.result()}"))
+        mqtt_dc.add_done_callback(lambda f: logger.debug(f"MQTT disconnect: {f.result()}"))
+
+        main_task = asyncio.current_task()
+        if main_task:
+            main_task.cancel()
+        time.sleep(30)
 
     async def run_mqtt(self):
         try:
@@ -390,13 +439,11 @@ class Cync2MQTT:
             logger.error("Will attempt reconnect in 10 minutes")
             return
 
-        pubqueue = asyncio.Queue()
-        subqueue = asyncio.Queue()
-        #        self.meshnetworks=acync(self.cloudjson,log=logger,callback=lambda asyncobj,devicestatus,q=pubqueue: q.put_nowait((asyncobj,devicestatus)))
-        import functools
+        pub_queue = asyncio.Queue()
+        sub_queue = asyncio.Queue()
 
-        self.mesh_networks = acync(
-            callback=functools.partial(pubqueue, self.callback_routine)
+        self.mesh_networks = ACync(
+            callback=functools.partial(self.callback_routine, pub_queue)
         )
         self.mesh_networks.populate_from_configdict(self.configdict)
         # announce to homeassistant discovery
@@ -420,12 +467,11 @@ class Cync2MQTT:
                 pass
             return
 
-        tasks = []
-        tasks.append(asyncio.create_task(self.pub_worker(pubqueue)))
-        subtask = asyncio.create_task(self.sub_worker(subqueue))
-        tasks.append(subtask)
-        tasks.append(asyncio.create_task(self.status_worker()))
-
+        tasks = [
+            asyncio.create_task(self.pub_worker(pub_queue)),
+            asyncio.create_task(self.sub_worker(sub_queue)),
+            asyncio.create_task(self.status_worker()),
+        ]
         # add signal handler to catch when it's time to shutdown
         loop = asyncio.get_running_loop()
         main_task = asyncio.current_task()
@@ -444,7 +490,7 @@ class Cync2MQTT:
             while True:
                 message = await self.mqtt.deliver_message()
                 if message:
-                    subqueue.put_nowait(message)
+                    sub_queue.put_nowait(message)
         except asyncio.CancelledError:
             logger.info("Termination signal received")
         except Exception as ce:
@@ -465,8 +511,8 @@ class Cync2MQTT:
             pass
 
         # Wait until the queue is fully processed.
-        await pubqueue.join()
-        await subqueue.join()
+        await pub_queue.join()
+        await sub_queue.join()
 
         # shutdown meshnetworks
         await self.mesh_networks.disconnect()

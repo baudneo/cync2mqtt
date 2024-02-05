@@ -3,11 +3,11 @@ version: '3'
 # - bluez bluetooth stack installed on your host machine
 # - Login and have configured your Cync devices
 # - Done the cync2mqtt login with 2fa and generated cync_mesh.yaml
-# - Configured the mqtt broker
+# - Configured the mqtt broker in cync_mesh.yaml; see cync_mesh_example.yaml
 services:
   cync2mqtt:
-    container_name: c2m
-    image: c2m:latest
+    container_name: cync2mqtt
+    image: cync2mqtt:baudneo
     restart: unless-stopped
     build:
       dockerfile: ../Dockerfile

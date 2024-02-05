@@ -2,6 +2,7 @@
 """A Script to start the cync2mqtt app"""
 import argparse
 import asyncio
+import functools
 import logging
 import os
 import sys
@@ -41,11 +42,11 @@ def run_in_subprocess(args, watchtime):
         if dbg_env in _t + _f:
             if dbg_env in _t:
                 dbg_arg = True
-                logger.debug("Debug mode enabled by DEBUG environment variable")
+                logger.info("Debug mode enabled by DEBUG environment variable")
 
             elif dbg_env in _f:
                 dbg_arg = False
-                logger.debug("Debug mode disabled by DEBUG environment variable")
+                logger.info("Debug mode disabled by DEBUG environment variable")
         if dbg_arg is True:
             for handler in logger.handlers:
                 handler.setLevel(logging.DEBUG)
@@ -60,24 +61,41 @@ def run_in_subprocess(args, watchtime):
     asyncio.run(cm.run_mqtt(), debug=dbg_arg)
 
 
+def main_signal_handler(p: Process, signum, frame):
+    """Signal handler to catch SIGINT and SIGTERM and try to shutdown cleanly.
+    If it fails, just kill the process."""
+    timeout = 30
+    logger.info("Trying clean shutdown (timeout %d)", timeout)
+    os.kill(p.pid, SIGINT)
+    _s = time.time()
+    p.join(timeout)
+    _end = time.time() - _s
+    if p.exitcode is None:
+        logger.error(f"Clean shutdown failed (took {_end:.5f}), killing process")
+        p.kill()
+    else:
+        logger.info(f"Clean shutdown succeeded (took {_end:.5f})")
+    sys.exit()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("configyaml", help="YAML config file")
-    parser.add_argument("--log-level", default='INFO', help='set log level', choices=['DEBUG', 'INFO'])
-    parser.add_argument("--prefer-mac", help="MAC address to prefer to connect to")
+    parser.add_argument("--log-level", default='INFO', help='set log level', choices=['debug', 'info'])
     args = parser.parse_args()
 
     logfmt = logging.Formatter(
-    "%(asctime)s.%(msecs)04d %(name)s [%(levelname)s] %(module)s:%(lineno)d -> %(message)s",
-    "%m/%d/%y %H:%M:%S",
-)
+        "%(asctime)s.%(msecs)04d %(levelname)s - %(name)s %(module)s:%(lineno)d -> %(message)s",
+        "%m/%d/%y %H:%M:%S",
+    )
     numeric_level = getattr(logging, args.log_level.upper(), None)
 
     if not isinstance(numeric_level, int):
         raise ValueError('Invalid log level: %s' % args.log_level)
 
     # set log level, log format and add a handler to stdout
-    for logname in (Cync2MQTT.LOG_NAME, Cync2MQTT.acync.LOG_NAME):
+    from acync import ACYNC_LOG_NAME, C2M_LOG_NAME
+    for logname in (ACYNC_LOG_NAME, C2M_LOG_NAME):
         setlogger = logging.getLogger(logname)
         setlogger.setLevel(numeric_level)
         h = logging.StreamHandler(sys.stdout)
@@ -90,38 +108,35 @@ def main():
         p = Process(target=run_in_subprocess, args=(args, watchtime))
         p.start()
 
-        def main_handler(signum, frame):
-            """Signal handler to catch SIGINT and SIGTERM and try to shutdown cleanly. If it fails, just kill the process."""
-            timeout = 30
-            logger.info(f'Signal handler called with signal: {signum}')
-            logger.info("Trying clean shutdown (timeout %d)", timeout)
-            os.kill(p.pid, SIGINT)
-            p.join(timeout)
-            if p.exitcode is None:
-                p.kill()
-            sys.exit()
-
-        signal(SIGTERM, main_handler)
-        signal(SIGINT, main_handler)
+        signal(SIGTERM, functools.partial(main_signal_handler, p))
+        signal(SIGINT, functools.partial(main_signal_handler, p))
 
         while True:
             time.sleep(60)
             # if it is currently 10 mins past the last time we checked, or the process has exited, break the loop
-            if int(time.time()) > watchtime.value + 600 or p.exitcode is not None:
+            if int(time.time()) > watchtime.value + 600:
+                logger.debug(f"breaking out of while True loop because int(time.time()) > watchtime.value + 600 "
+                             f"[10 mins since process started?]")
                 break
-
+            elif p.exitcode is not None:
+                logger.debug(f"breaking out of while True loop because p.exitcode is not None")
+                break
         if p.exitcode is None:
-            logger.error("Notify timeout - attempt restart!")
+            logger.error("Notify timeout? [p.exitcode is None] - attempt restart by sending SIGINT...")
             # Send signal
             os.kill(p.pid, SIGINT)
         elif p.exitcode == -1:
             break
+        _s = time.time()
         p.join(30)
+        logger.debug(f"After while True loop - Join returned after {time.time() - _s:.5f} seconds")
         if p.exitcode is None:
+            logger.error("Clean shutdown failed, killing process")
             p.kill()
 
         sleeptime = watchtime.value + 600 - int(time.time())
-        if sleeptime < 10: sleeptime = 10
+        if sleeptime < 10:
+            sleeptime = 10
         logger.info(f"Will attempt reconnect in {sleeptime} seconds")
         time.sleep(sleeptime)
         logger.info("Restarting!")

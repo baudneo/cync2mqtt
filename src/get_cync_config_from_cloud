@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from acync import acync
+from acync import ACync
 import argparse
 from pathlib import Path
 import json
@@ -17,10 +17,10 @@ def main():
         with Path(args.jsonin).open("rt") as fp:
             meshinfo = json.load(fp)
     else:
-        meshinfo = acync.get_app_meshinfo()
+        meshinfo = ACync.get_app_meshinfo()
 
     with Path(args.configyaml).open("wt") as fp:
-        yaml.dump(acync.app_meshinfo_to_configdict(meshinfo), fp)
+        yaml.dump(ACync.app_meshinfo_to_configdict(meshinfo), fp)
 
     if args.jsonout:
         with Path(args.jsonout).open("wt") as fp:

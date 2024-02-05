@@ -1,7 +1,7 @@
 meshconfig:
   1986531234:
     usebtlib: bluepy  # default is bleak - use bluepy to workaround connect issues with some devices
-    access_key: 123456 #changed to 123456 for security, 6 digit number shown
+    access_key: 123456 # changed to 123456 for security, 6-digit number shown
     bulbs:
       1:
         mac: A4:C1:38:54:2A:B3
@@ -12,7 +12,8 @@ meshconfig:
         is_plug: true
         mac: F4:BC:DA:3F:31:75
         name: Plug
-        # You can set a priority for mesh connection like this (0 being highest priority)
+        timeout: 15
+        # You can set a priority for mesh connection like this (0 being highest priority and the default of all devices)
         # setting priority -1 tells the client to not attempt to connect to this mesh node
         priority: 99
       3:
@@ -24,6 +25,10 @@ meshconfig:
         supports_temperature: true
         supports_rgb: true
     mac: 44ADB1815E67
+    # name of the network (name of each home or location in the cync app)
     name: HASS
 # To use authentication -> mqtt://username:password@homeassistant:1883/ 
 mqtt_url: mqtt://homeassistant:1883/
+
+#mqtt_topic: acyncmqtt
+#ha_mqtt_topic: homeassistant
