@@ -3,14 +3,19 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 import json
 import logging
 import os
+import signal
+import sys
 import time
+from pathlib import Path
 from signal import SIGINT, SIGTERM
 from typing import Optional, TYPE_CHECKING
 
 from amqtt.client import MQTTClient
+import amqtt.session
 from amqtt.mqtt.constants import QOS_0, QOS_1
 from bleak import BLEDevice, AdvertisementData
 
@@ -22,7 +27,8 @@ if TYPE_CHECKING:
 LOG_NAME: str = 'cync2mqtt'
 logger = logging.getLogger(LOG_NAME)
 logger.addHandler(logging.NullHandler())
-STATUS_UPDATE_INTERVAL: int = 600
+# This should catch disconnections from physical/external events
+STATUS_UPDATE_INTERVAL: int = 60
 MQTT_DEBUG: bool = False
 BT_DEBUG: bool = False
 _true = ('TRUE', '1', 'YES', 'Y', 'T')
@@ -37,11 +43,14 @@ class Cync2MQTT:
     """docstring for cync2mqtt.py"""
 
     def __init__(self, configdict, **kwargs):
+        self.signal_called: bool = False
         if os.environ.get('MQTT_DEBUG') is not None:
             global MQTT_DEBUG
             if os.environ.get('MQTT_DEBUG').strip().upper() in _true:
+                logger.debug("MQTT_DEBUG set to True by environment variable")
                 MQTT_DEBUG = True
             elif os.environ.get('MQTT_DEBUG').strip().upper() in _false:
+                logger.debug("MQTT_DEBUG set to False by environment variable")
                 MQTT_DEBUG = False
         if os.environ.get('BT_DEBUG') is not None:
             global BT_DEBUG
@@ -258,22 +267,21 @@ class Cync2MQTT:
 
     async def sub_worker(self, sub_queue: asyncio.Queue):
         while True:
-            message = await sub_queue.get()
+            message: amqtt.session.ApplicationMessage = await sub_queue.get()
+
             if message is None:
                 logger.error("sub_worker - message is None, skipping...")
                 continue
-            logger.debug(f"sub_worker - {message=}")
 
             try:
-                packet = message.publish_packet
-            except:
-                logger.error("sub_worker - message is not a packet, skipping...")
+                packet: amqtt.mqtt.packet.MQTTPacket = message.publish_packet
+            except Exception as e:
+                logger.error("sub_worker - message.publish_packet exception: %s" % e)
                 continue
-
             logger.debug(
                 "sub_worker - %s => %s"
                 % (packet.variable_header.topic_name, str(packet.payload.data))
-            ) if MQTT_DEBUG is True else None
+            ) #if MQTT_DEBUG is True else None
             topic = packet.variable_header.topic_name.split("/")
             if len(topic) == 4:
                 if topic[1] == "set":
@@ -357,34 +365,36 @@ class Cync2MQTT:
             for network in self.mesh_networks.networks.values():
                 count = 0
                 while not await network.update_status():
-                    logger.info("network.status_update failed!")
-                    for device_name, device in network.devices.items():
+                    # Only runs if update_status fails
+                    logger.warning("status worker: network.status_update failed!")
+                    for device_name, device in self.mesh_networks.devices.items():
+                        logger.debug("\n\n DBG Cync2MQTT:status worker: >>> device type: %s // network type: %s\n\n" % (type(device), type(network)))
                         availability = b"offline"
                         logger.debug(
                             f"status_worker  mqtt publish: {self.topic}/availability/{device_name}  {availability}"
                         ) if MQTT_DEBUG is True else None
                         try:
-                            message = await self.mqtt.publish(
+                            _ = await self.mqtt.publish(
                                 f"{self.topic}/availability/{device_name}",
                                 availability,
                                 qos=QOS_0,
                             )
-                        except:
-                            logger.info("MQTT fail- attempt shutdown!")
+                        except Exception as e:
+                            logger.info("status worker: MQTT fail - attempt shutdown => %s" % e)
                             os.kill(os.getpid(), SIGINT)
                     if count > 3:
                         # Take drastic action
-                        logger.info("Communication timeout- attempt shutdown!")
+                        logger.info("status worker: Communication timeout - attempt shutdown!")
                         os.kill(os.getpid(), SIGINT)
 
                     logger.info(
-                        "Status update failed!  - waiting two minutes to try again"
+                        "status worker: Status update failed! - waiting two minutes to try again"
                     )
 
                     # Wait 2 minutes and try again
                     await asyncio.sleep(120)
                     count += 1
-                    logger.info("Retry status update")
+                    logger.info("status worker: Retry status update")
 
             # Wait a reasonable amount of time for device nodes to report status through the mesh
             await asyncio.sleep(0.2 * len(self.mesh_networks.devices.keys()))
@@ -394,33 +404,36 @@ class Cync2MQTT:
             for device_name, device in self.mesh_networks.devices.items():
                 availability = b"online" if device.online else b"offline"
                 logger.debug(
-                    f"status_worker  mqtt publish: {self.topic}/availability/{device_name}  {availability}"
+                    f"status_worker: mqtt publish: {self.topic}/availability/{device_name}  {availability}"
                 ) if MQTT_DEBUG is True else None
                 await self.mqtt.publish(
                     f"{self.topic}/availability/{device_name}", availability, qos=QOS_0
                 )
             if self.watch_time is not None:
                 self.watch_time.value = int(time.time())
-            # logger.debug(f"status_worker: sleeping for {STATUS_UPDATE_INTERVAL}...")
+                # logger.debug(f"status_worker: watch_time updated to {self.watch_time.value}")
+            logger.debug(f"status_worker: sleeping for {STATUS_UPDATE_INTERVAL}...")
             await asyncio.sleep(STATUS_UPDATE_INTERVAL)
 
     @staticmethod
-    async def callback_routine(pubqueue: asyncio.Queue, asyncobj, devicestatus):
-        pubqueue.put_nowait((asyncobj, devicestatus))
+    async def callback_routine(pub_queue: asyncio.Queue, async_obj: ACync, device_status: Network.device_status):
+        caller = inspect.stack()[1]
+        # logger.debug(f"Cync2MQTT callback_routine called by: {Path(caller.filename).name}:{caller.lineno} "
+        #              f"with data:{device_status}")
+        pub_queue.put_nowait((async_obj, device_status))
 
-    def signal_handler(self):
-        logger.debug(f"class Signal handler called, doing disconnections...")
-        # async
-        loop = asyncio.get_running_loop()
-        bt_dc = asyncio.run_coroutine_threadsafe(self.mesh_networks.disconnect(), loop)
-        mqtt_dc = asyncio.run_coroutine_threadsafe(self.mqtt.disconnect(), loop)
-        bt_dc.add_done_callback(lambda f: logger.debug(f"Bluetooth disconnect: {f.result()}"))
-        mqtt_dc.add_done_callback(lambda f: logger.debug(f"MQTT disconnect: {f.result()}"))
+    def signal_handler(self, signum: Optional[int] = None, frame = None):
+        if self.signal_called is False:
+            self.signal_called = True
+        elif self.signal_called is True:
+            logger.debug(f"Cync2MQTT Signal handler called, cancelling current asyncio.task...")
+            main_task = asyncio.current_task()
+            if main_task:
+                logger.debug(f"main_task: {main_task} -- calling cancel()")
+                main_task.cancel()
+            logger.debug(f"Cync2MQTT Signal handler done, calling sys.exit(1)")
+            sys.exit(1)
 
-        main_task = asyncio.current_task()
-        if main_task:
-            main_task.cancel()
-        time.sleep(30)
 
     async def run_mqtt(self):
         try:
@@ -474,9 +487,8 @@ class Cync2MQTT:
         ]
         # add signal handler to catch when it's time to shutdown
         loop = asyncio.get_running_loop()
-        main_task = asyncio.current_task()
         for signal in [SIGINT, SIGTERM]:
-            loop.add_signal_handler(signal, main_task.cancel)
+            loop.add_signal_handler(signal, self.signal_handler)
 
         await self.mqtt.subscribe(
             [
@@ -496,7 +508,7 @@ class Cync2MQTT:
         except Exception as ce:
             logger.error("Client exception: %s" % ce)
 
-        logger.info("Shutting down")
+        logger.info("Unsubscribing from MQTT topics...")
         try:
             await self.mqtt.unsubscribe(
                 [
@@ -506,19 +518,24 @@ class Cync2MQTT:
                     f"{self.ha_topic}/status",
                 ]
             )
+            logger.debug("Unsubscribed from topics, cancelling mqtt tasks and calling disconnect...")
+            await self.mqtt.cancel_tasks()
             await self.mqtt.disconnect()
         except:
-            pass
+            logger.warning("MQTT disconnect failed...")
 
         # Wait until the queue is fully processed.
+        logger.debug("Waiting for pub_queue to finish...")
         await pub_queue.join()
+        logger.debug("pub_queue finished, waiting for sub_queue...")
         await sub_queue.join()
-
-        # shutdown meshnetworks
+        logger.debug("sub_queue finished, calling disconnect on mesh_networks...")
+        # shutdown mesh_networks
         await self.mesh_networks.disconnect()
-
+        logger.debug("mesh_networks disconnected, waiting for tasks...")
         # Cancel our worker tasks.
         for task in tasks:
             task.cancel()
         # Wait until all worker tasks are cancelled.
         await asyncio.gather(*tasks, return_exceptions=True)
+        logger.debug("All tasks finished, exiting...")

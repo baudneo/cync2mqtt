@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-from acync import ACync
+"""A script to authenticate to the Cync Cloud API and download device info for importing into Cync2MQTT"""
+
 import argparse
 from pathlib import Path
 import json
+
 import yaml
+
+from acync import ACync
 
 
 def main():
@@ -12,19 +16,20 @@ def main():
     parser.add_argument("--jsonin", help="Optional input config JSON - default is to load from cloud")
     parser.add_argument("--jsonout", help="Optional output config JSON")
     args = parser.parse_args()
+    acync = ACync()
 
     if args.jsonin:
         with Path(args.jsonin).open("rt") as fp:
-            meshinfo = json.load(fp)
+            mesh_info = json.load(fp)
     else:
-        meshinfo = ACync.get_app_meshinfo()
+        mesh_info = acync.get_cloud_mesh_info()
 
     with Path(args.configyaml).open("wt") as fp:
-        yaml.dump(ACync.app_meshinfo_to_configdict(meshinfo), fp)
+        yaml.dump(acync.mesh_to_config(mesh_info), fp)
 
     if args.jsonout:
         with Path(args.jsonout).open("wt") as fp:
-            json.dump(meshinfo, fp)
+            json.dump(mesh_info, fp)
 
 
 if __name__ == "__main__":

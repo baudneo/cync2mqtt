@@ -152,3 +152,36 @@ Outside of the initial setup of downloading the mesh credentials from your cloud
 - Async BLE python: https://pypi.org/project/bleak/
 - Async MQTT: https://amqtt.readthedocs.io/en/latest/index.html
 - [zimmra](https://github.com/zimmra) for docker container, debug, and testing.
+
+
+
+```log
+# Plug (id: 4) toggled in Cync App - Plug has weird issue where it shows offline in HASS. Plug is connected to via bluetooth from phone or WiFi.
+mesh:169 -> btle gatt: bluepy: handleNotification: adding to notification queue with id: 114
+mesh:222 -> btle_gatt:bluepy: notify_worker: got item from notify_queue => noti_id: 114 // data: b'7\x00\x00\x06\x00\xe1/\xa98\x92\xa9\x99\xdamT\xd4\xb6\x06g\x07'
+mesh:797 -> bt noti:id:114: Full Decrypted data: [55, 0, 0, 6, 0, 225, 47, 234, 17, 2, 6, 161, 1, 1, 1, 0, 0, 0, 0, 0]
+mesh:819 -> bt noti:id:114: [6, 161, 1, 1] => device_id: 6 // brightness: 1 // UNKNOWN: 161
+mesh:838 -> bt noti:id:114: Tunable white data (or plug)! [6, 161, 1, 1] => device_id: 6 // brightness: 1 // UNKNOWN: 161 // color_temp = 1
+mesh:843 -> bt noti:id:114: Unknown command [byte 8]: 0xea/234 (Expected 0xdc/220), not sending back down the callback stack!
+mesh:865 -> bt noti:id:114: Only 1/2 responses processed => [6, 161, 1, 1, 1, 0, 0, 0]
+
+
+mesh:169 -> btle gatt: bluepy: handleNotification: adding to notification queue with id: 52
+mesh:222 -> btle_gatt:bluepy: notify_worker: got item from notify_queue => noti_id: 52 // data: b'9\x00\x00\x06\x00\x8b\xf2QR\x0c\x89\x8dls-.>\xae3\xb1'
+mesh:797 -> bt noti:id=52: Full Decrypted data: [57, 0, 0, 6, 0, 139, 242, 234, 17, 2, 6, 161, 1, 1, 1, 0, 0, 0, 0, 0]
+mesh:819 -> bt noti:id=52: [6, 161, 1, 1] => device_id: 6 // brightness: 1 // UNKNOWN: 161
+mesh:838 -> bt noti:id=52: Tunable white data (or plug)! [6, 161, 1, 1] => device_id: 6 // brightness: 1 // UNKNOWN: 161 // color_temp = 1
+mesh:843 -> bt noti:id=52: Unknown command [byte 8]: 0xea/234 (Expected 0xdc/220), not sending back down the callback stack!
+mesh:865 -> bt noti:id=52: Only 1/2 responses processed => [6, 161, 1, 1, 1, 0, 0, 0]
+
+
+
+cync2mqtt Cync2MQTT:281 -> sub_worker - acyncmqtt/set/7B19400144A4D0F4/1 => bytearray(b'{"state":"ON","brightness":41}')
+acync.mesh mesh:169 -> btle gatt: bluepy: handleNotification: adding to notification queue with id: 117
+acync.mesh mesh:222 -> btle_gatt:bluepy: notify_worker: got item from notify_queue => noti_id: 117 // data: b'\xdd8\x00\x00\x00\x83:LX\xdd\x895i\xad\xd4\x12\x16L\xaf0'
+acync.mesh mesh:797 -> bt noti:id=117: Full Decrypted data: [221, 56, 0, 0, 0, 131, 58, 220, 17, 2, 1, 1, 41, 12, 0, 0, 0, 0, 0, 0]
+acync.mesh mesh:819 -> bt noti:id=117: [1, 1, 41, 12] => device_id: 1 // brightness: 41 // UNKNOWN: 1
+acync.mesh mesh:838 -> bt noti:id=117: Tunable white data (or plug)! [1, 1, 41, 12] => device_id: 1 // brightness: 41 // UNKNOWN: 1 // color_temp = 12
+acync main:132 -> ACync _callback_routine called by: mesh.py:848 - data included in callback -> DeviceStatus(name='7B19400144A4D0F4', id=1, brightness=41, rgb=False, red=0, green=0, blue=0, color_temp=12, notification_id=117)
+acync.mesh mesh:865 -> bt noti:id=117: Only 1/2 responses processed => [1, 1, 41, 12, 0, 0, 0, 0]
+```

@@ -12,13 +12,16 @@ from pathlib import Path
 from signal import SIGINT, SIGTERM, signal
 
 import yaml
+from bluepy.btle import Debugging
 
 from acync import Cync2MQTT
 
 logger = logging.getLogger('cync2mqtt')
-
+EXPIRE_SECS: int = 240
 
 def run_in_subprocess(args, watchtime):
+    global Debugging
+
     # watchtime is time.time() of when the process was called
     with Path(args.configyaml).open("rt") as fp:
         configdict = yaml.safe_load(fp)
@@ -47,17 +50,21 @@ def run_in_subprocess(args, watchtime):
             elif dbg_env in _f:
                 dbg_arg = False
                 logger.info("Debug mode disabled by DEBUG environment variable")
+
         if dbg_arg is True:
             for handler in logger.handlers:
                 handler.setLevel(logging.DEBUG)
             logger.setLevel(logging.DEBUG)
+            Debugging = True
         elif dbg_arg is False:
             for handler in logger.handlers:
                 handler.setLevel(logging.INFO)
             logger.setLevel(logging.INFO)
+    logger.debug("Setting up sub process signal handlers")
 
-    # import uvloop
-    # uvloop.new_event_loop().run_until_complete(cm.run_mqtt())
+    import uvloop
+    loop = uvloop.new_event_loop()
+    asyncio.set_event_loop(loop)
     asyncio.run(cm.run_mqtt(), debug=dbg_arg)
 
 
@@ -65,7 +72,7 @@ def main_signal_handler(p: Process, signum, frame):
     """Signal handler to catch SIGINT and SIGTERM and try to shutdown cleanly.
     If it fails, just kill the process."""
     timeout = 30
-    logger.info("Trying clean shutdown (timeout %d)", timeout)
+    logger.info("Trying clean shutdown, sending SIGINT (timeout %d)", timeout)
     os.kill(p.pid, SIGINT)
     _s = time.time()
     p.join(timeout)
@@ -74,7 +81,7 @@ def main_signal_handler(p: Process, signum, frame):
         logger.error(f"Clean shutdown failed (took {_end:.5f}), killing process")
         p.kill()
     else:
-        logger.info(f"Clean shutdown succeeded (took {_end:.5f})")
+        logger.info(f"Clean shutdown succeeded [Code: {p.exitcode}] took {_end:.5f}")
     sys.exit()
 
 
@@ -113,16 +120,16 @@ def main():
 
         while True:
             time.sleep(60)
-            # if it is currently 10 mins past the last time we checked, or the process has exited, break the loop
-            if int(time.time()) > watchtime.value + 600:
-                logger.debug(f"breaking out of while True loop because int(time.time()) > watchtime.value + 600 "
-                             f"[10 mins since process started?]")
+            # if it is currently EXPIRE_SECS past the last time we checked, or the process has exited, break the loop
+            if int(time.time()) > watchtime.value + EXPIRE_SECS:
+                logger.debug(f"breaking out of INNER while True loop because {EXPIRE_SECS} seconds have passed "
+                             "with no mesh updates (Hung process?)")
                 break
             elif p.exitcode is not None:
-                logger.debug(f"breaking out of while True loop because p.exitcode is not None")
+                logger.debug("breaking out of while True loop because p.exitcode is not None (Hung process?)")
                 break
         if p.exitcode is None:
-            logger.error("Notify timeout? [p.exitcode is None] - attempt restart by sending SIGINT...")
+            logger.error("Something happened! [p.exitcode is None] - attempt restart by sending SIGINT...")
             # Send signal
             os.kill(p.pid, SIGINT)
         elif p.exitcode == -1:
@@ -134,7 +141,7 @@ def main():
             logger.error("Clean shutdown failed, killing process")
             p.kill()
 
-        sleeptime = watchtime.value + 600 - int(time.time())
+        sleeptime = watchtime.value + EXPIRE_SECS - int(time.time())
         if sleeptime < 10:
             sleeptime = 10
         logger.info(f"Will attempt reconnect in {sleeptime} seconds")
